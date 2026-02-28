@@ -1,23 +1,20 @@
 import { Router } from 'express';
 import YahooFinance from 'yahoo-finance2';
-
-const yahooFinance = new YahooFinance();
+import supabase from '../db/client.js';
 
 const router = Router();
+const yahooFinance = new YahooFinance();
 
+// ─── VALIDATE ────────────────────────────────────────────────────────────────
 // GET /api/portfolio/validate?ticker=AAPL
-// Returns { valid: true, name, sector, price } or { valid: false }
-// Called on every debounced keystroke in TickerSearch component
+// Must be defined before /:id to avoid being matched as an ID param.
 router.get('/validate', async (req, res) => {
   const ticker = req.query.ticker?.toUpperCase();
   if (!ticker) return res.status(400).json({ error: 'ticker is required' });
 
   try {
     const quote = await yahooFinance.quote(ticker, {}, { validateResult: false });
-
-    if (!quote?.regularMarketPrice) {
-      return res.json({ valid: false });
-    }
+    if (!quote?.regularMarketPrice) return res.json({ valid: false });
 
     return res.json({
       valid: true,
@@ -31,16 +28,124 @@ router.get('/validate', async (req, res) => {
   }
 });
 
+// ─── SNAPSHOTS ────────────────────────────────────────────────────────────────
+// GET /api/portfolio/snapshots
+// Must be defined before /:id.
+router.get('/snapshots', async (req, res) => {
+  const { data, error } = await supabase
+    .from('portfolio_snapshots')
+    .select('snapshot_date, total_value, created_at')
+    .eq('user_id', req.userId)
+    .order('snapshot_date', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ─── GET ALL HOLDINGS ─────────────────────────────────────────────────────────
+// GET /api/portfolio
+router.get('/', async (req, res) => {
+  const { data, error } = await supabase
+    .from('holdings')
+    .select('*')
+    .eq('user_id', req.userId)
+    .order('created_at', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ─── ADD HOLDING ──────────────────────────────────────────────────────────────
+// POST /api/portfolio
+// Body: { ticker, shares, avg_cost, asset_type? }
+// name and sector are auto-filled from Yahoo Finance
+router.post('/', async (req, res) => {
+  const { ticker, shares, avg_cost, asset_type } = req.body;
+
+  if (!ticker || shares == null || avg_cost == null) {
+    return res.status(400).json({ error: 'ticker, shares, and avg_cost are required' });
+  }
+
+  const upperTicker = ticker.toUpperCase();
+  let name = upperTicker;
+  let sector = null;
+  let finalAssetType = asset_type || 'stock';
+
+  // Auto-fill name, sector, asset_type from Yahoo Finance
+  try {
+    const quote = await yahooFinance.quote(upperTicker, {}, { validateResult: false });
+    if (quote?.regularMarketPrice) {
+      name = quote.shortName || quote.longName || upperTicker;
+      sector = quote.sector || null;
+      if (!asset_type) finalAssetType = deriveAssetType(quote.quoteType);
+    }
+  } catch {
+    // Non-fatal — proceed with ticker as name
+  }
+
+  const { data, error } = await supabase
+    .from('holdings')
+    .insert({
+      user_id: req.userId,
+      ticker: upperTicker,
+      name,
+      shares: Number(shares),
+      avg_cost: Number(avg_cost),
+      asset_type: finalAssetType,
+      sector,
+    })
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
+});
+
+// ─── UPDATE HOLDING ───────────────────────────────────────────────────────────
+// PUT /api/portfolio/:id
+// Body: { shares?, avg_cost? }
+router.put('/:id', async (req, res) => {
+  const { shares, avg_cost } = req.body;
+
+  if (shares == null && avg_cost == null) {
+    return res.status(400).json({ error: 'shares or avg_cost is required' });
+  }
+
+  const updates = { updated_at: new Date().toISOString() };
+  if (shares != null)   updates.shares   = Number(shares);
+  if (avg_cost != null) updates.avg_cost = Number(avg_cost);
+
+  const { data, error } = await supabase
+    .from('holdings')
+    .update(updates)
+    .eq('id', req.params.id)
+    .eq('user_id', req.userId)   // ownership check
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: 'Holding not found' });
+  res.json(data);
+});
+
+// ─── DELETE HOLDING ───────────────────────────────────────────────────────────
+// DELETE /api/portfolio/:id
+router.delete('/:id', async (req, res) => {
+  const { error } = await supabase
+    .from('holdings')
+    .delete()
+    .eq('id', req.params.id)
+    .eq('user_id', req.userId);  // ownership check
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(204).send();
+});
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function deriveAssetType(quoteType) {
   if (!quoteType) return 'stock';
   const map = { ETF: 'etf', CRYPTOCURRENCY: 'crypto', MUTUALFUND: 'etf', BOND: 'bond', OPTION: 'option' };
   return map[quoteType] ?? 'stock';
 }
-
-// GET    /api/portfolio           — implemented in Step 6
-// POST   /api/portfolio           — implemented in Step 6
-// PUT    /api/portfolio/:id       — implemented in Step 6
-// DELETE /api/portfolio/:id       — implemented in Step 6
-// GET    /api/portfolio/snapshots — implemented in Step 6
 
 export default router;
