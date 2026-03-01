@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 
 import requireAuth from './middleware/requireAuth.js';
+import { startScheduler } from './scheduler/index.js';
 import authRoutes from './routes/auth.js';
 import portfolioRoutes from './routes/portfolio.js';
 import briefingsRoutes from './routes/briefings.js';
@@ -24,4 +25,7 @@ app.use('/api/agent', requireAuth, agentRoutes);
 app.use('/api/settings', requireAuth, settingsRoutes);
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`fire-pulse server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`fire-pulse server running on port ${PORT}`);
+  startScheduler();
+});
