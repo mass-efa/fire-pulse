@@ -11,7 +11,21 @@ import settingsRoutes from './routes/settings.js';
 
 const app = express();
 
-app.use(cors({ origin: process.env.CLIENT_URL }));
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  'http://localhost:5173',
+  /^http:\/\/192\.168\.\d+\.\d+:5173$/,
+].filter(Boolean);
+
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // server-to-server / curl
+    const ok = allowedOrigins.some(o =>
+      o instanceof RegExp ? o.test(origin) : o === origin
+    );
+    cb(ok ? null : new Error('Not allowed by CORS'), ok);
+  },
+}));
 app.use(express.json());
 
 // Public routes
