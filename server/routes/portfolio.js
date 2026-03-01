@@ -1,9 +1,14 @@
 import { Router } from 'express';
 import YahooFinance from 'yahoo-finance2';
+import axios from 'axios';
 import supabase from '../db/client.js';
 
 const router = Router();
 const yahooFinance = new YahooFinance();
+
+// In-memory validation cache: ticker → { result, expiresAt }
+const validateCache = new Map();
+const VALIDATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 // ─── VALIDATE ────────────────────────────────────────────────────────────────
 // GET /api/portfolio/validate?ticker=AAPL
@@ -12,20 +17,59 @@ router.get('/validate', async (req, res) => {
   const ticker = req.query.ticker?.toUpperCase();
   if (!ticker) return res.status(400).json({ error: 'ticker is required' });
 
+  // Serve from cache if still fresh
+  const cached = validateCache.get(ticker);
+  if (cached && Date.now() < cached.expiresAt) {
+    return res.json(cached.result);
+  }
+
+  // Try Yahoo Finance first
   try {
     const quote = await yahooFinance.quote(ticker, {}, { validateResult: false });
-    if (!quote?.regularMarketPrice) return res.json({ valid: false });
-
-    return res.json({
-      valid: true,
-      name: quote.shortName || quote.longName || ticker,
-      sector: quote.sector || null,
-      price: quote.regularMarketPrice,
-      assetType: deriveAssetType(quote.quoteType),
-    });
-  } catch {
-    return res.json({ valid: false });
+    if (quote?.regularMarketPrice) {
+      const result = {
+        valid: true,
+        name: quote.shortName || quote.longName || ticker,
+        sector: quote.sector || null,
+        price: quote.regularMarketPrice,
+        assetType: deriveAssetType(quote.quoteType),
+      };
+      validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+      return res.json(result);
+    }
+  } catch (err) {
+    console.warn(`validate: Yahoo failed for ${ticker} — ${err.message}`);
   }
+
+  // Fallback: Alpha Vantage GLOBAL_QUOTE
+  try {
+    const { data } = await axios.get('https://www.alphavantage.co/query', {
+      params: {
+        function: 'GLOBAL_QUOTE',
+        symbol: ticker,
+        apikey: process.env.ALPHA_VANTAGE_API_KEY,
+      },
+      timeout: 6000,
+    });
+    const q = data?.['Global Quote'];
+    const price = parseFloat(q?.['05. price']);
+    if (price) {
+      const result = {
+        valid: true,
+        name: ticker,       // AV GLOBAL_QUOTE doesn't return a name
+        sector: null,
+        price,
+        assetType: 'stock',
+      };
+      validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+      return res.json(result);
+    }
+  } catch (err) {
+    console.warn(`validate: Alpha Vantage failed for ${ticker} — ${err.message}`);
+  }
+
+  const invalid = { valid: false };
+  return res.json(invalid);
 });
 
 // ─── SNAPSHOTS ────────────────────────────────────────────────────────────────
