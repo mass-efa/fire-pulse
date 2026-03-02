@@ -1,0 +1,60 @@
+services:
+  # ── Express API server ──────────────────────────────────────────────────────
+  - type: web
+    name: fire-pulse-server
+    env: node
+    region: oregon
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_EXPIRY
+        value: 30d
+      - key: PORT
+        value: 10000
+      # Set these in the Render dashboard after connecting your repo:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      # Set to the static site URL once you know it, e.g. https://fire-pulse-client.onrender.com
+      - key: CLIENT_URL
+        sync: false
+
+  # ── React frontend (static site) ────────────────────────────────────────────
+  - type: web
+    name: fire-pulse-client
+    env: static
+    region: oregon
+    plan: free
+    rootDir: client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      # Send all paths to index.html so React Router handles routing client-side
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      # Set to https://fire-pulse-server.onrender.com/api
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
