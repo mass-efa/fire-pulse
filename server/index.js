@@ -13,8 +13,9 @@ const app = express();
 
 const allowedOrigins = [
   process.env.CLIENT_URL,
-  'http://localhost:5173',
-  /^http:\/\/192\.168\.\d+\.\d+:5173$/,
+  // Allow any Vite dev port (5173–5179) so port bumps don't break CORS
+  /^http:\/\/localhost:517[0-9]$/,
+  /^http:\/\/192\.168\.\d+\.\d+:517[0-9]$/,
 ].filter(Boolean);
 
 app.use(cors({
@@ -39,7 +40,12 @@ app.use('/api/agent', requireAuth, agentRoutes);
 app.use('/api/settings', requireAuth, settingsRoutes);
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`fire-pulse server running on port ${PORT}`);
   startScheduler();
 });
+
+// Graceful shutdown so node --watch hot-reloads release the port cleanly
+function shutdown() { server.close(() => process.exit(0)); }
+process.on('SIGTERM', shutdown);
+process.on('SIGUSR2', shutdown);
