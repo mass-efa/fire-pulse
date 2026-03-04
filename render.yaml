@@ -40,7 +40,6 @@ services:
   - type: web
     name: fire-pulse-client
     env: static
-    region: oregon
     plan: free
     rootDir: client
     buildCommand: npm install && npm run build
