@@ -8,7 +8,12 @@ const yahooFinance = new YahooFinance();
 
 // In-memory validation cache: ticker → { result, expiresAt }
 const validateCache = new Map();
-const VALIDATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const VALIDATE_TTL_MS     = 10 * 60 * 1000; // 10 min  — successful lookups
+const VALIDATE_NEG_TTL_MS =  2 * 60 * 1000; // 2 min   — failed lookups (prevents hammering)
+
+// Track when Yahoo last 429'd so we can skip it for a cooldown window
+let yahooRateLimitedUntil = 0;
+const YAHOO_COOLDOWN_MS = 60 * 1000; // 60 s cooldown after a 429
 
 // ─── VALIDATE ────────────────────────────────────────────────────────────────
 // GET /api/portfolio/validate?ticker=AAPL
@@ -17,28 +22,37 @@ router.get('/validate', async (req, res) => {
   const ticker = req.query.ticker?.toUpperCase();
   if (!ticker) return res.status(400).json({ error: 'ticker is required' });
 
-  // Serve from cache if still fresh
+  // Serve from cache if still fresh (covers both valid and invalid results)
   const cached = validateCache.get(ticker);
   if (cached && Date.now() < cached.expiresAt) {
     return res.json(cached.result);
   }
 
-  // Try Yahoo Finance first
-  try {
-    const quote = await yahooFinance.quote(ticker, {}, { validateResult: false });
-    if (quote?.regularMarketPrice) {
-      const result = {
-        valid: true,
-        name: quote.shortName || quote.longName || ticker,
-        sector: quote.sector || null,
-        price: quote.regularMarketPrice,
-        assetType: deriveAssetType(quote.quoteType),
-      };
-      validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
-      return res.json(result);
+  const yahooThrottled = Date.now() < yahooRateLimitedUntil;
+
+  // Try Yahoo Finance first (unless currently rate-limited)
+  if (!yahooThrottled) {
+    try {
+      const quote = await yahooFinance.quote(ticker, {}, { validateResult: false });
+      if (quote?.regularMarketPrice) {
+        const result = {
+          valid: true,
+          name: quote.shortName || quote.longName || ticker,
+          sector: quote.sector || null,
+          price: quote.regularMarketPrice,
+          assetType: deriveAssetType(quote.quoteType),
+        };
+        validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+        return res.json(result);
+      }
+    } catch (err) {
+      if (err.message?.includes('429') || err.statusCode === 429) {
+        yahooRateLimitedUntil = Date.now() + YAHOO_COOLDOWN_MS;
+        console.warn(`validate: Yahoo 429 for ${ticker} — cooling down ${YAHOO_COOLDOWN_MS / 1000}s`);
+      } else {
+        console.warn(`validate: Yahoo failed for ${ticker} — ${err.message}`);
+      }
     }
-  } catch (err) {
-    console.warn(`validate: Yahoo failed for ${ticker} — ${err.message}`);
   }
 
   // Fallback: Alpha Vantage GLOBAL_QUOTE
@@ -68,7 +82,9 @@ router.get('/validate', async (req, res) => {
     console.warn(`validate: Alpha Vantage failed for ${ticker} — ${err.message}`);
   }
 
+  // Cache the negative result briefly so rapid retries don't re-hit the APIs
   const invalid = { valid: false };
+  validateCache.set(ticker, { result: invalid, expiresAt: Date.now() + VALIDATE_NEG_TTL_MS });
   return res.json(invalid);
 });
 
