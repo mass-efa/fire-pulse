@@ -49,3 +49,13 @@ const server = app.listen(PORT, () => {
 function shutdown() { server.close(() => process.exit(0)); }
 process.on('SIGTERM', shutdown);
 process.on('SIGUSR2', shutdown);
+
+// Keep-alive: prevent Render free-tier spin-down so the scheduler keeps running.
+// Pings own /health every 14 minutes. No-op in dev (server URL won't be set).
+if (process.env.NODE_ENV === 'production' && process.env.RENDER_EXTERNAL_URL) {
+  const keepAliveUrl = `${process.env.RENDER_EXTERNAL_URL}/health`;
+  setInterval(() => {
+    fetch(keepAliveUrl).catch(() => {}); // fire-and-forget, ignore failures
+  }, 14 * 60 * 1000);
+  console.log(`Keep-alive pinging ${keepAliveUrl} every 14 min`);
+}
