@@ -18,19 +18,54 @@ const YAHOO_COOLDOWN_MS = 60 * 1000; // 60 s cooldown after a 429
 // ─── VALIDATE ────────────────────────────────────────────────────────────────
 // GET /api/portfolio/validate?ticker=AAPL
 // Must be defined before /:id to avoid being matched as an ID param.
+//
+// Cache hierarchy (fastest → slowest):
+//   1. In-memory validateCache  (survives within a process, ~10 min TTL)
+//   2. Supabase price_cache     (survives server restarts, 24 h TTL)
+//   3. Yahoo Finance            (primary live source)
+//   4. Alpha Vantage            (fallback, 25 req/day free tier)
+const SUPABASE_VALIDATE_TTL_H = 24; // hours — persistent cache TTL
+
 router.get('/validate', async (req, res) => {
   const ticker = req.query.ticker?.toUpperCase();
   if (!ticker) return res.status(400).json({ error: 'ticker is required' });
 
-  // Serve from cache if still fresh (covers both valid and invalid results)
+  // 1. In-memory cache
   const cached = validateCache.get(ticker);
   if (cached && Date.now() < cached.expiresAt) {
     return res.json(cached.result);
   }
 
+  // 2. Supabase persistent cache (only for positive results — negatives aren't stored)
+  try {
+    const { data: row } = await supabase
+      .from('price_cache')
+      .select('price, name, sector, asset_type, fetched_at')
+      .eq('ticker', ticker)
+      .single();
+
+    if (row?.price) {
+      const ageH = (Date.now() - new Date(row.fetched_at).getTime()) / 3_600_000;
+      if (ageH < SUPABASE_VALIDATE_TTL_H) {
+        const result = {
+          valid: true,
+          name: row.name || ticker,
+          sector: row.sector || null,
+          price: Number(row.price),
+          assetType: row.asset_type || 'stock',
+        };
+        // Warm the in-memory cache so subsequent requests in this process are instant
+        validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+        return res.json(result);
+      }
+    }
+  } catch {
+    // Non-fatal — continue to live sources
+  }
+
   const yahooThrottled = Date.now() < yahooRateLimitedUntil;
 
-  // Try Yahoo Finance first (unless currently rate-limited)
+  // 3. Try Yahoo Finance (unless currently rate-limited)
   if (!yahooThrottled) {
     try {
       const quote = await yahooFinance.quote(ticker, {}, { validateResult: false });
@@ -42,7 +77,9 @@ router.get('/validate', async (req, res) => {
           price: quote.regularMarketPrice,
           assetType: deriveAssetType(quote.quoteType),
         };
+        // Persist to both caches
         validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+        persistToSupabase(ticker, result, 'yahoo').catch(() => {});
         return res.json(result);
       }
     } catch (err) {
@@ -55,7 +92,7 @@ router.get('/validate', async (req, res) => {
     }
   }
 
-  // Fallback: Alpha Vantage GLOBAL_QUOTE
+  // 4. Fallback: Alpha Vantage GLOBAL_QUOTE
   try {
     const { data } = await axios.get('https://www.alphavantage.co/query', {
       params: {
@@ -70,14 +107,17 @@ router.get('/validate', async (req, res) => {
     if (price) {
       const result = {
         valid: true,
-        name: ticker,       // AV GLOBAL_QUOTE doesn't return a name
+        name: ticker,   // AV GLOBAL_QUOTE doesn't return a name
         sector: null,
         price,
         assetType: 'stock',
       };
       validateCache.set(ticker, { result, expiresAt: Date.now() + VALIDATE_TTL_MS });
+      persistToSupabase(ticker, result, 'alphavantage').catch(() => {});
       return res.json(result);
     }
+    // Log AV rate-limit messages so we can see them in server logs
+    if (data?.Information) console.warn(`validate: Alpha Vantage info for ${ticker} — ${data.Information}`);
   } catch (err) {
     console.warn(`validate: Alpha Vantage failed for ${ticker} — ${err.message}`);
   }
@@ -202,6 +242,20 @@ router.delete('/:id', async (req, res) => {
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+// Upsert a validated ticker into Supabase price_cache so it survives restarts.
+async function persistToSupabase(ticker, result, source) {
+  await supabase.from('price_cache').upsert({
+    ticker,
+    price: result.price,
+    name: result.name,
+    sector: result.sector,
+    asset_type: result.assetType,
+    source,
+    fetched_at: new Date().toISOString(),
+  }, { onConflict: 'ticker' });
+}
+
 function deriveAssetType(quoteType) {
   if (!quoteType) return 'stock';
   const map = { ETF: 'etf', CRYPTOCURRENCY: 'crypto', MUTUALFUND: 'etf', BOND: 'bond', OPTION: 'option' };
