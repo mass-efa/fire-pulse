@@ -7,6 +7,8 @@ import Dashboard from './pages/Dashboard';
 import Portfolio from './pages/Portfolio';
 import History   from './pages/History';
 import Settings  from './pages/Settings';
+import Privacy   from './pages/Privacy';
+import Terms     from './pages/Terms';
 
 function ProtectedLayout() {
   const { isAuthenticated, loading } = useAuth();
@@ -24,8 +26,10 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/welcome" element={<Welcome />} />
-          <Route path="/verify"  element={<Verify />} />
+          <Route path="/welcome"  element={<Welcome />} />
+          <Route path="/verify"   element={<Verify />} />
+          <Route path="/privacy"  element={<Privacy />} />
+          <Route path="/terms"    element={<Terms />} />
           <Route element={<ProtectedLayout />}>
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
